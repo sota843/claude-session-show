@@ -1,0 +1,28 @@
+{
+  "source": "oauth",
+  "fallback_to_ccusage": true,
+  "user_agent": null,
+  "poll_interval_sec": 300,
+
+  "ccusage_cmd": ["npx", "-y", "ccusage@latest"],
+  "ccusage_extra_args": ["--offline"],
+
+  "budget_mode": "fixed",
+  "plan": "max20x",
+  "plans": {
+    "pro":    { "session_tokens": 5000000,   "weekly_tokens": 40000000 },
+    "max5x":  { "session_tokens": 25000000,  "weekly_tokens": 200000000 },
+    "max20x": { "session_tokens": 100000000, "weekly_tokens": 800000000 }
+  },
+
+  "thresholds": { "warn": 0.60, "crit": 0.85 },
+  "colors": {
+    "ok":      [60, 200, 90],
+    "warn":    [235, 185, 20],
+    "crit":    [225, 55, 55],
+    "track":   [70, 70, 70],
+    "unknown": [130, 130, 130]
+  },
+  "show_center_text": true,
+  "icon_size": 64
+}
