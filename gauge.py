@@ -57,9 +57,12 @@ def render_double_ring(outer_pct: Optional[float], inner_pct: Optional[float],
     img = Image.new("RGBA", (big, big), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    pad = big * 0.06
-    ring_w = max(2, int(big * 0.13))
-    gap = int(big * 0.04)
+    # Subtle dark disc so the icon is always visible against any taskbar colour.
+    draw.ellipse([0, 0, big - 1, big - 1], fill=(28, 28, 30, 235))
+
+    pad = big * 0.03
+    ring_w = max(3, int(big * 0.17))
+    gap = int(big * 0.05)
 
     # Outer ring (session)
     outer_box = [pad, pad, big - pad, big - pad]

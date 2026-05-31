@@ -8,6 +8,7 @@ Run:   pythonw tray_app.py     (no console)
 """
 from __future__ import annotations
 
+import sys
 import threading
 from datetime import datetime
 from typing import Optional
@@ -19,6 +20,22 @@ import autostart
 import config as config_mod
 import gauge as gauge_mod
 import usage as usage_mod
+
+# Windows consoles often default to cp932/Shift-JIS, which can't encode some
+# characters and would crash print(). Force UTF-8 and never raise on encoding.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+    except Exception:  # noqa: BLE001 - older/odd streams; logging stays best-effort
+        pass
+
+
+def log(msg: str) -> None:
+    """Print a timestamped line to the console (no-op window under pythonw)."""
+    try:
+        print(f"[{datetime.now():%H:%M:%S}] {msg}", flush=True)
+    except Exception:  # noqa: BLE001 - console logging must never crash the app
+        pass
 
 
 class TrayApp:
@@ -76,6 +93,12 @@ class TrayApp:
         self._last = snap
         self.icon.icon = gauge_mod.make_icon(snap, self.cfg)
         self.icon.title = self._title_for(snap)
+        if snap.ok:
+            s = "?" if not snap.session or snap.session.pct is None else round(snap.session.pct * 100)
+            w = "?" if not snap.weekly or snap.weekly.pct is None else round(snap.weekly.pct * 100)
+            log(f"updated [{snap.source}] 5h={s}% week={w}%")
+        else:
+            log(f"update FAILED: {snap.error}")
 
     @staticmethod
     def _title_for(snap: usage_mod.UsageSnapshot) -> str:
@@ -86,21 +109,38 @@ class TrayApp:
         # The oauth endpoint is rate-limited; never poll it faster than 180s.
         floor = 180 if self.cfg.get("source", "oauth") == "oauth" else 30
         interval = max(floor, int(self.cfg.get("poll_interval_sec", 300)))
+        log(f"worker started (source={self.cfg.get('source')}, interval={interval}s)")
         while not self._stop.is_set():
             snap = usage_mod.fetch_snapshot(self.cfg)
             self._apply(snap)
             # Wait for the interval, but wake early on manual refresh/quit.
             self._wake.wait(timeout=interval)
             self._wake.clear()
+        log("worker stopped")
+
+    def _setup(self, icon) -> None:
+        # Called by pystray once the message loop is ready.
+        icon.visible = True
+        try:
+            icon.notify("Claude usage 起動しました。トレイの '^' の中にアイコンがあります。",
+                        "Claude usage")
+        except Exception:  # noqa: BLE001
+            pass
+        threading.Thread(target=self._worker, daemon=True).start()
 
     def run(self) -> None:
-        worker = threading.Thread(target=self._worker, daemon=True)
-        # Start the worker once the icon is visible.
-        self.icon.run(setup=lambda _i: worker.start())
+        log("tray icon starting - look in the taskbar tray (click the '^' overflow arrow).")
+        self.icon.run(setup=self._setup)
+        log("tray app exited.")
 
 
 def main() -> None:
-    TrayApp().run()
+    try:
+        TrayApp().run()
+    except Exception:  # noqa: BLE001 - surface startup crashes in the console
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
 
 
 if __name__ == "__main__":
