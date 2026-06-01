@@ -107,7 +107,7 @@ class TrayApp:
 
     def _worker(self, _icon=None) -> None:
         # The oauth endpoint is rate-limited; never poll it faster than 180s.
-        floor = 180 if self.cfg.get("source", "oauth") == "oauth" else 30
+        floor = 60 if self.cfg.get("source", "oauth") == "oauth" else 30
         interval = max(floor, int(self.cfg.get("poll_interval_sec", 300)))
         log(f"worker started (source={self.cfg.get('source')}, interval={interval}s)")
         while not self._stop.is_set():
