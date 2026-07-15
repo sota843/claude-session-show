@@ -22,9 +22,13 @@ Claude Code の **5時間セッション枠**と**週次枠**の使用量を、W
 
 > ⚠️ **oauth エンドポイントは強くレート制限されます。** ポーリングは 180 秒以上（既定 300 秒）。
 > また必須ヘッダ `User-Agent: claude-code/<version>` を自動付与します。
-> アクセストークンは短命で、**Claude Code を使っている間は自動更新**されますが、長時間未使用で
-> 期限切れになると oauth 呼び出しは失敗し、`fallback_to_ccusage` が true なら推定表示に切り替わります
-> （`claude` を一度起動すればトークンが更新されます）。
+> アクセストークンは短命ですが、**本アプリが `refreshToken` を使って自動更新**します
+> （`auto_refresh: true`。既定 ON）。失効間近・失効時・usage が 401 を返した時に、
+> `~/.claude/.credentials.json` の `refreshToken` で新しい `accessToken` を発行し書き戻します。
+> **Claude Code を起動しておく必要はありません。** `refreshToken` は更新のたびに延長されるため、
+> トレイが定期的に動いていれば失効しません。ただし `refreshToken` 自体が期限切れ（長期間 PC 未起動など）
+> になった場合のみ、一度 `claude` を起動して再認証が必要です。その間は `fallback_to_ccusage` が
+> true なら推定表示に切り替わります。
 
 ## 必要環境
 - Windows 11
@@ -62,6 +66,7 @@ python tray_app.py
 |---|---|
 | `source` | `"oauth"`（公式・既定）/ `"ccusage"`（推定） |
 | `fallback_to_ccusage` | oauth 失敗時に推定へ自動フォールバック（既定 true） |
+| `auto_refresh` | 失効時に `refreshToken` で accessToken を自動再発行（既定 true）。Claude Code の起動が不要になる |
 | `user_agent` | oauth 用 UA。`null` で `claude --version` から自動検出 |
 | `poll_interval_sec` | 更新間隔（秒）。既定 300（oauth は 180 未満不可） |
 | `ccusage_cmd` | ccusage の起動コマンド。グローバル導入なら `["ccusage"]` |

@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -33,6 +34,21 @@ import config as config_mod
 CREDENTIALS_PATH = os.path.expanduser("~/.claude/.credentials.json")
 OAUTH_USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
+
+# OAuth token refresh — the same public client Claude Code uses. When the local
+# accessToken is expired (or about to expire) we exchange the long-lived
+# refreshToken for a fresh accessToken, so the tray keeps working without ever
+# having to open Claude Code. The refreshToken is rotated on each refresh, which
+# also extends its own expiry as long as we poll regularly.
+OAUTH_TOKEN_URL = "https://console.anthropic.com/v1/oauth/token"
+OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+# Refresh a bit before the hard expiry so a request never rides an expired token.
+_REFRESH_SKEW_MS = 120_000
+
+# Under pythonw (no console), shelling out to a .cmd like npx/ccusage would spawn
+# a visible cmd window on every call. CREATE_NO_WINDOW suppresses it. The flag is
+# Windows-only, so fall back to 0 elsewhere.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
 @dataclass
@@ -87,7 +103,8 @@ def _user_agent(cfg: Dict[str, Any]) -> str:
     if exe:
         try:
             out = subprocess.run([exe, "--version"], capture_output=True,
-                                 text=True, timeout=15).stdout
+                                 text=True, timeout=15,
+                                 creationflags=_NO_WINDOW).stdout
             m = re.search(r"(\d+\.\d+\.\d+)", out)
             if m:
                 version = m.group(1)
@@ -101,6 +118,61 @@ def _read_oauth_creds() -> Dict[str, Any]:
     with open(CREDENTIALS_PATH, "r", encoding="utf-8") as fh:
         data = json.load(fh)
     return data.get("claudeAiOauth", data)
+
+
+def _write_oauth_creds(updates: Dict[str, Any]) -> None:
+    """Merge ``updates`` into the OAuth block of credentials.json atomically,
+    preserving the file's structure and any other keys."""
+    with open(CREDENTIALS_PATH, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    block = data.get("claudeAiOauth") if isinstance(data.get("claudeAiOauth"), dict) else data
+    block.update(updates)
+    tmp = CREDENTIALS_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, CREDENTIALS_PATH)
+
+
+def _refresh_oauth_token(creds: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """Exchange the refreshToken for a fresh accessToken and persist it.
+
+    Returns the updated creds dict. Raises on failure (expired/invalid refresh
+    token, network error, rate limit) so the caller can fall back."""
+    refresh_token = creds.get("refreshToken")
+    if not refresh_token:
+        raise RuntimeError("no refreshToken in credentials (run Claude Code once)")
+
+    rte = creds.get("refreshTokenExpiresAt")
+    if rte and time.time() * 1000 > float(rte):
+        raise RuntimeError("refreshToken expired (run Claude Code once to re-auth)")
+
+    body = json.dumps({
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "client_id": OAUTH_CLIENT_ID,
+    }).encode()
+    req = urllib.request.Request(
+        OAUTH_TOKEN_URL,
+        data=body,
+        headers={"Content-Type": "application/json", "User-Agent": _user_agent(cfg)},
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        tok = json.load(resp)
+
+    now_ms = int(time.time() * 1000)
+    updates: Dict[str, Any] = {
+        "accessToken": tok["access_token"],
+        "expiresAt": now_ms + int(tok.get("expires_in", 0)) * 1000,
+    }
+    if tok.get("refresh_token"):
+        updates["refreshToken"] = tok["refresh_token"]
+    if tok.get("refresh_token_expires_in"):
+        updates["refreshTokenExpiresAt"] = now_ms + int(tok["refresh_token_expires_in"]) * 1000
+    _write_oauth_creds(updates)
+
+    merged = dict(creds)
+    merged.update(updates)
+    return merged
 
 
 def _window_gauge(window: Optional[Dict[str, Any]]) -> Optional[Gauge]:
@@ -117,25 +189,47 @@ def _window_gauge(window: Optional[Dict[str, Any]]) -> Optional[Gauge]:
 
 def _oauth_snapshot(cfg: Dict[str, Any], now: datetime) -> UsageSnapshot:
     creds = _read_oauth_creds()
+
+    # Auto-refresh when the accessToken is missing, expired, or about to expire,
+    # so the tray no longer needs Claude Code to be running to stay authorised.
+    expires_at = creds.get("expiresAt")
+    needs_refresh = (
+        not creds.get("accessToken")
+        or (expires_at and time.time() * 1000 > float(expires_at) - _REFRESH_SKEW_MS)
+    )
+    if needs_refresh and cfg.get("auto_refresh", True):
+        creds = _refresh_oauth_token(creds, cfg)
+
     token = creds.get("accessToken")
     if not token:
         raise RuntimeError("no accessToken in credentials")
-
     expires_at = creds.get("expiresAt")
     if expires_at and time.time() * 1000 > float(expires_at):
         raise RuntimeError("oauth token expired (run Claude Code to refresh)")
 
-    req = urllib.request.Request(
-        OAUTH_USAGE_URL,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "anthropic-beta": OAUTH_BETA,
-            "User-Agent": _user_agent(cfg),
-            "Content-Type": "application/json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.load(resp)
+    def _get_usage(bearer: str) -> Dict[str, Any]:
+        req = urllib.request.Request(
+            OAUTH_USAGE_URL,
+            headers={
+                "Authorization": f"Bearer {bearer}",
+                "anthropic-beta": OAUTH_BETA,
+                "User-Agent": _user_agent(cfg),
+                "Content-Type": "application/json",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.load(resp)
+
+    try:
+        data = _get_usage(token)
+    except urllib.error.HTTPError as exc:
+        # Token rejected despite passing the local expiry check (clock skew or
+        # server-side revocation): refresh once and retry.
+        if exc.code == 401 and cfg.get("auto_refresh", True):
+            creds = _refresh_oauth_token(creds, cfg)
+            data = _get_usage(creds["accessToken"])
+        else:
+            raise
 
     session = _window_gauge(data.get("five_hour"))
     weekly = _window_gauge(data.get("seven_day"))
@@ -167,7 +261,8 @@ def _run_ccusage(cfg: Dict[str, Any], subcommand: str) -> Dict[str, Any]:
         raise FileNotFoundError(base[0])
 
     cmd = base + [subcommand, "--json"] + list(cfg.get("ccusage_extra_args", []))
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, shell=False)
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120,
+                          shell=False, creationflags=_NO_WINDOW)
     if proc.returncode != 0:
         raise RuntimeError(f"ccusage {subcommand} exited {proc.returncode}: {proc.stderr.strip()[:300]}")
     return json.loads(proc.stdout)
