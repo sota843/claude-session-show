@@ -1,5 +1,5 @@
 {
-  "source": "oauth",
+  "source": "ccusage",
   "fallback_to_ccusage": true,
   "auto_refresh": true,
   "user_agent": null,
