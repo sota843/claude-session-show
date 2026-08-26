@@ -3,13 +3,13 @@
   "fallback_to_ccusage": true,
   "auto_refresh": true,
   "user_agent": null,
-  "poll_interval_sec": 60,
+  "poll_interval_sec": 300,
 
   "ccusage_cmd": ["npx", "-y", "ccusage@latest"],
   "ccusage_extra_args": ["--offline"],
 
   "budget_mode": "fixed",
-  "plan": "max20x",
+  "plan": "pro",
   "plans": {
     "pro":    { "session_tokens": 5000000,   "weekly_tokens": 40000000 },
     "max5x":  { "session_tokens": 25000000,  "weekly_tokens": 200000000 },

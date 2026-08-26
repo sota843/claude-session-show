@@ -90,13 +90,38 @@ python tray_app.py
 | `gauge.py` | Pillow で二重リングアイコンを描画（単体実行でサンプル PNG 出力） |
 | `config.py` / `config.json` | 設定の読み込みと既定値 |
 | `autostart.py` | スタートアップ登録の ON/OFF |
+| `appdata.py` | ログファイルと状態（リフレッシュのバックオフ / 最後の取得値）の保存 |
 
 ## 動作確認
 ```powershell
-python usage.py     # 5時間枠・週次枠の使用トークン/リセット時刻を表示
+python usage.py          # 5時間枠・週次枠の使用トークン/リセット時刻を表示
+python usage.py diag     # 認証状態（トークン期限・バックオフ・ログ場所）を表示
+python usage.py refresh  # トークン再取得をその場で強制実行
 python gauge.py     # sample_30/70/95/unknown.png を出力（色分け確認）
 python tray_app.py  # トレイ常駐
 ```
+
+## トークン更新とトラブルシューティング
+ログイン時に常駐させると、accessToken（有効 8 時間前後）は必ず期限切れになります。その時は
+`refreshToken` で自動再発行しますが、**トークン発行エンドポイント自体が強くレート制限**されており、
+失敗した更新を短間隔で再試行すると 429 から抜け出せなくなります（＝Claude Code を起動するまで
+使用量が出ない状態）。そこで:
+
+- トークン発行先は **`https://platform.claude.com/v1/oauth/token`**（`scope` 付き JSON）。
+  Claude Code 2.1.x 本体と同じ宛先・同じ形です。旧 `console.anthropic.com/v1/oauth/token` は
+  現在どのトークンを送っても 429 を返すため、そちらのままだと永久に更新できません。
+- 更新失敗時は **5分 → 15分 → 30分 → 60分** と間隔を空けて再試行（通信エラー時は 1分 → 2分 → 5分 → 10分）。
+  状態は `state.json` に保存され、再起動しても引き継がれます。
+- 更新中は `~/.claude/.tray_oauth_refresh.lock` で排他し、直前に `credentials.json` を読み直します。
+  他プロセス（Claude Code など）が先に更新していれば、そのトークンをそのまま使います。
+- `credentials.json` の更新を 5 秒間隔で監視。Claude Code を起動した瞬間に取得を再開します。
+- 取得に失敗している間は **最後に取得できた値**をリングに残し、ツールチップに
+  「⚠ 取得失敗 / 表示は◯分前の値」と理由を表示します（値は `state.json` に保存され再起動後も復元）。
+- 右クリックメニューの **「トークンを再取得」** でバックオフを無視して即再試行、
+  **「ログを開く」** で `%LOCALAPPDATA%/ClaudeUsageTray/tray.log` を開けます。
+
+`pythonw` 起動ではコンソールが無く失敗理由が見えないため、動作ログは常に上記ファイルへ出力されます。
+`refreshToken` 自体が失効した場合（長期間 PC 未起動など）は、一度 `claude` を起動して再認証してください。
 
 ## 既知の限界
 - `oauth` の数値は `/usage` と同一（公式）。ただしエンドポイントは非公開で、Anthropic 側の
