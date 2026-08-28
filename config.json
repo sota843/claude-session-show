@@ -3,7 +3,7 @@
   "fallback_to_ccusage": true,
   "auto_refresh": true,
   "user_agent": null,
-  "poll_interval_sec": 300,
+  "poll_interval_sec": 60,
 
   "ccusage_cmd": ["npx", "-y", "ccusage@latest"],
   "ccusage_extra_args": ["--offline"],
