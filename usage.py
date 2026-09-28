@@ -38,17 +38,21 @@ OAUTH_BETA = "oauth-2025-04-20"
 
 # OAuth token refresh — the same public client Claude Code uses. When the local
 # accessToken is expired (or about to expire) we exchange the long-lived
-# refreshToken for a fresh accessToken, so the tray keeps working without ever
-# having to open Claude Code. The refreshToken is rotated on each refresh, which
-# also extends its own expiry as long as we poll regularly.
+# refreshToken for a fresh accessToken, without launching Claude Code.
 #
-# The endpoint moved: Claude Code <= ~2.0 used console.anthropic.com, which now
-# answers every refresh with HTTP 429 regardless of the token. 2.1.x posts to
-# platform.claude.com and includes a ``scope`` field. Verified against the
-# installed bundle (@anthropic-ai/claude-code 2.1.85, function HQ6):
+# Verified against the installed Claude Code 2.1.247 bundle:
 #   POST {TOKEN_URL}  Content-Type: application/json
 #   {grant_type, refresh_token, client_id, scope}
 OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+# Token exchange uses Claude Code's Axios headers, NOT the claude-code/<version>
+# UA required by the usage API. On this machine the usage headers produced 429
+# on every exchange; the Axios headers succeeded with the same credentials.
+# Keep these separate from the configurable usage User-Agent.
+OAUTH_TOKEN_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json, text/plain, */*",
+    "User-Agent": "axios/1.9.0",
+}
 OAUTH_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 OAUTH_SCOPES = ["user:profile", "user:inference", "user:sessions:claude_code",
                 "user:mcp_servers", "user:file_upload"]
@@ -288,7 +292,7 @@ def _do_refresh(creds: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
     req = urllib.request.Request(
         OAUTH_TOKEN_URL,
         data=body,
-        headers={"Content-Type": "application/json", "User-Agent": _user_agent(cfg)},
+        headers=OAUTH_TOKEN_HEADERS,
     )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:

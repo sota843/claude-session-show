@@ -27,6 +27,7 @@ DEFAULTS: Dict[str, Any] = {
     "source": "oauth",
     # If the oauth call fails (expired token, offline), fall back to the estimate.
     "fallback_to_ccusage": True,
+    "auto_refresh": True,
     # User-Agent for the oauth endpoint; null = auto-detect from `claude --version`.
     # The endpoint REQUIRES a "claude-code/<version>" UA.
     "user_agent": None,

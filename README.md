@@ -25,9 +25,9 @@ Claude Code の **5時間セッション枠**と**週次枠**の使用量を、W
 > アクセストークンは短命ですが、**本アプリが `refreshToken` を使って自動更新**します
 > （`auto_refresh: true`。既定 ON）。失効間近・失効時・usage が 401 を返した時に、
 > `~/.claude/.credentials.json` の `refreshToken` で新しい `accessToken` を発行し書き戻します。
-> **Claude Code を起動しておく必要はありません。** `refreshToken` は更新のたびに延長されるため、
-> トレイが定期的に動いていれば失効しません。ただし `refreshToken` 自体が期限切れ（長期間 PC 未起動など）
-> になった場合のみ、一度 `claude` を起動して再認証が必要です。その間は `fallback_to_ccusage` が
+> **通常のトークン更新では Claude Code を起動しておく必要はありません。**
+> `refreshToken` 自体が期限切れ・取り消しになった場合は、一度 Claude Code で再ログインが必要です。
+> その間は `fallback_to_ccusage` が
 > true なら推定表示に切り替わります。
 
 ## 必要環境
@@ -67,7 +67,7 @@ python tray_app.py
 | `source` | `"oauth"`（公式・既定）/ `"ccusage"`（推定） |
 | `fallback_to_ccusage` | oauth 失敗時に推定へ自動フォールバック（既定 true） |
 | `auto_refresh` | 失効時に `refreshToken` で accessToken を自動再発行（既定 true）。Claude Code の起動が不要になる |
-| `user_agent` | oauth 用 UA。`null` で `claude --version` から自動検出 |
+| `user_agent` | 使用量取得用 UA。`null` で `claude --version` から自動検出。認証更新のヘッダーは別管理 |
 | `poll_interval_sec` | 更新間隔（秒）。既定 300（oauth は 180 未満不可） |
 | `ccusage_cmd` | ccusage の起動コマンド。グローバル導入なら `["ccusage"]` |
 | `ccusage_extra_args` | 追加引数。既定 `["--offline"]`（料金データのオンライン取得を回避） |
@@ -99,17 +99,19 @@ python usage.py diag     # 認証状態（トークン期限・バックオフ�
 python usage.py refresh  # トークン再取得をその場で強制実行
 python gauge.py     # sample_30/70/95/unknown.png を出力（色分け確認）
 python tray_app.py  # トレイ常駐
+python -m unittest -v test_usage  # 自動更新・期限切れ・通信復旧の回帰テスト（実通信なし）
 ```
 
 ## トークン更新とトラブルシューティング
-ログイン時に常駐させると、accessToken（有効 8 時間前後）は必ず期限切れになります。その時は
-`refreshToken` で自動再発行しますが、**トークン発行エンドポイント自体が強くレート制限**されており、
-失敗した更新を短間隔で再試行すると 429 から抜け出せなくなります（＝Claude Code を起動するまで
-使用量が出ない状態）。そこで:
+accessToken（有効 8 時間前後）が期限切れに近づくと、`refreshToken` で自動再発行します。
+起動時点で期限切れの場合も同じ処理で復帰します。
 
 - トークン発行先は **`https://platform.claude.com/v1/oauth/token`**（`scope` 付き JSON）。
-  Claude Code 2.1.x 本体と同じ宛先・同じ形です。旧 `console.anthropic.com/v1/oauth/token` は
-  現在どのトークンを送っても 429 を返すため、そちらのままだと永久に更新できません。
+  インストール済み Claude Code 2.1.247 本体と同じ宛先・同じ形です。
+- **認証更新と使用量取得の HTTP ヘッダーを分離**しています。2026-09-28 の実機調査では、
+  認証更新に `claude-code/<version>` を送る従来の形式は 429 で失敗しました。
+  本体の Axios と同じ `User-Agent: axios/1.9.0` と `Accept: application/json, text/plain, */*`
+  に変更すると、同じ認証情報で更新に成功しました。使用量取得は引き続き `claude-code/<version>` を使います。
 - 更新失敗時は **5分 → 15分 → 30分 → 60分** と間隔を空けて再試行（通信エラー時は 1分 → 2分 → 5分 → 10分）。
   状態は `state.json` に保存され、再起動しても引き継がれます。
 - 更新中は `~/.claude/.tray_oauth_refresh.lock` で排他し、直前に `credentials.json` を読み直します。
@@ -121,7 +123,7 @@ python tray_app.py  # トレイ常駐
   **「ログを開く」** で `%LOCALAPPDATA%/ClaudeUsageTray/tray.log` を開けます。
 
 `pythonw` 起動ではコンソールが無く失敗理由が見えないため、動作ログは常に上記ファイルへ出力されます。
-`refreshToken` 自体が失効した場合（長期間 PC 未起動など）は、一度 `claude` を起動して再認証してください。
+`refreshToken` 自体が期限切れ・取り消しになった場合は、一度 Claude Code で再ログインしてください。
 
 ## 既知の限界
 - `oauth` の数値は `/usage` と同一（公式）。ただしエンドポイントは非公開で、Anthropic 側の
