@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import ssl
 import subprocess
 import time
 import urllib.error
@@ -78,6 +79,22 @@ _LOCK_STALE_SEC = 120
 # a visible cmd window on every call. CREATE_NO_WINDOW suppresses it. The flag is
 # Windows-only, so fall back to 0 elsewhere.
 _NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+# Python's default context on Windows trusts the Windows cert store, and that
+# store can hold an expired cross-signed "ISRG Root X2". OpenSSL then builds
+# platform.claude.com's chain through the expired copy and fails with
+# "certificate has expired" - so the refresh never worked and the tray only
+# recovered when Claude Code (Node, with its own CA bundle) refreshed for us.
+# Prefer certifi's bundle, like Node does; fall back to the OS store.
+def _make_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return ssl.create_default_context()
+
+
+_SSL_CTX = _make_ssl_context()
 
 
 @dataclass
@@ -295,7 +312,7 @@ def _do_refresh(creds: Dict[str, Any], cfg: Dict[str, Any]) -> Dict[str, Any]:
         headers=OAUTH_TOKEN_HEADERS,
     )
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             tok = json.load(resp)
     except urllib.error.HTTPError as exc:
         retry_after: Optional[float] = None
@@ -377,7 +394,7 @@ def _oauth_snapshot(cfg: Dict[str, Any], now: datetime) -> UsageSnapshot:
                 "Content-Type": "application/json",
             },
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
             return json.load(resp)
 
     try:
