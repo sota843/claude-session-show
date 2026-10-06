@@ -25,5 +25,9 @@
     "unknown": [130, 130, 130]
   },
   "show_center_text": true,
-  "icon_size": 64
+  "icon_size": 64,
+
+  "taskbar_band": true,
+  "taskbar_band_offset_x": 0,
+  "taskbar_band_reset": "remaining"
 }

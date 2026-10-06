@@ -2,6 +2,7 @@
 
 Shows a double-ring icon (outer = 5-hour session, inner = weekly) that refreshes
 on an interval. Hover for percentages + reset times; right-click for the menu.
+Also embeds a wide battery-style meter in the taskbar (taskbar_band.py).
 
 Run:   pythonw tray_app.py     (no console)
        python  tray_app.py     (with console, for debugging)
@@ -22,6 +23,7 @@ import appdata
 import autostart
 import config as config_mod
 import gauge as gauge_mod
+import taskbar_band
 import usage as usage_mod
 
 # Windows consoles often default to cp932/Shift-JIS, which can't encode some
@@ -59,6 +61,10 @@ class TrayApp:
             title="Claude usage: loading…",
             menu=self._build_menu(),
         )
+        # Wide meter embedded in the taskbar (see taskbar_band.py).
+        self.band: Optional[taskbar_band.TaskbarBand] = None
+        if self.cfg.get("taskbar_band"):
+            self.band = taskbar_band.TaskbarBand(self.cfg, log=log)
 
     # ----- menu -------------------------------------------------------------
     def _build_menu(self) -> Menu:
@@ -114,6 +120,8 @@ class TrayApp:
         self.icon.update_menu()
 
     def _on_quit(self, _icon=None, _item=None) -> None:
+        if self.band:
+            self.band.stop()
         self._stop.set()
         self._wake.set()
         self.icon.stop()
@@ -126,6 +134,8 @@ class TrayApp:
             appdata.update_state(last_snapshot=usage_mod.snapshot_to_dict(snap))
             self.icon.icon = gauge_mod.make_icon(snap, self.cfg)
             self.icon.title = self._title_for(snap)
+            if self.band:
+                self.band.update(snap)
             s = "?" if not snap.session or snap.session.pct is None else round(snap.session.pct * 100)
             w = "?" if not snap.weekly or snap.weekly.pct is None else round(snap.weekly.pct * 100)
             log(f"updated [{snap.source}] 5h={s}% week={w}%")
@@ -136,9 +146,13 @@ class TrayApp:
             # Keep the last known rings on screen, but say plainly that they are old.
             self.icon.icon = gauge_mod.make_icon(self._last_good, self.cfg)
             self.icon.title = self._stale_title(self._last_good, snap)
+            if self.band:
+                self.band.update(self._last_good, stale=True)
         else:
             self.icon.icon = gauge_mod.make_icon(snap, self.cfg)
             self.icon.title = self._title_for(snap)
+            if self.band:
+                self.band.update(None)
 
     @staticmethod
     def _title_for(snap: usage_mod.UsageSnapshot) -> str:
@@ -206,6 +220,13 @@ class TrayApp:
                         "Claude usage")
         except Exception:  # noqa: BLE001
             pass
+        if self.band:
+            try:
+                self.band.start()
+                self.band.update(self._last_good)
+            except Exception as exc:  # noqa: BLE001 - the tray icon must keep working
+                log(f"[band] start failed: {exc!r}")
+                self.band = None
         threading.Thread(target=self._worker, daemon=True).start()
 
     def run(self) -> None:

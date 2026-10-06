@@ -8,6 +8,8 @@ Claude Code の **5時間セッション枠**と**週次枠**の使用量を、W
 - 色: 〜60% 緑 / 〜85% 黄 / 〜100% 赤
 - アイコンにマウスを乗せると、各枠の使用% と次のリセット時刻を表示
 - 右クリックメニュー: 今すぐ更新 / 自動起動 ON・OFF / 終了
+- **タスクバー埋め込みメーター** — 通知領域（`^`）のすぐ左に、バッテリー風の横長メーターで
+  `5h ▰▰▱▱ 42%  2h13m` / `7d ▰▰▰▱ 73%  3d4h` を常時表示（下記「タスクバー表示」）
 
 ![sample](sample_95.png)
 
@@ -56,6 +58,20 @@ python tray_app.py
 ```
 タスクトレイに二重リングアイコンが表示されます。
 
+## タスクバー表示
+トレイアイコンは正方形・固定サイズのため、横長表示はタスクバー（`Shell_TrayWnd`）の
+子ウィンドウとして独自に描画しています（TrafficMonitor と同じ方式）。
+
+- 2段表示: 上 = 5時間枠 / 下 = 週次枠。電池の色はリングと同じしきい値で緑・黄・赤
+- 右端はリセットまでの残り時間（`taskbar_band_reset` で時刻表示・非表示に変更可）。1分ごとに更新
+- 取得失敗時は最後の値を半透明で表示
+- クリックはタスクバーへ素通り。ライト/ダークテーマと DPI に自動追従
+- エクスプローラー再起動やトレイのアイコン増減にも 1 秒以内に追従・再埋め込み
+- 位置がずれる場合は `taskbar_band_offset_x` で調整（マイナスで左へ）
+
+> ⚠️ 非公式な埋め込み方式のため、Windows の大型アップデートで表示が崩れる可能性があります。
+> その場合は `"taskbar_band": false` にすればトレイアイコンのみの従来動作に戻ります。
+
 ## 自動起動（Windows ログイン時）
 トレイアイコンを右クリック →「Windows起動時に自動起動」をチェック。
 スタートアップフォルダに `ClaudeUsageTray.lnk`（`pythonw tray_app.py`）が作成されます。
@@ -78,6 +94,9 @@ python tray_app.py
 | `colors` | リングの色（RGB） |
 | `show_center_text` | アイコン中央に 5時間枠の使用%（整数）を重ねる |
 | `icon_size` | 内部描画サイズ（既定 64、Windows 側で縮小） |
+| `taskbar_band` | タスクバー埋め込みメーターを表示（既定 true） |
+| `taskbar_band_offset_x` | メーターの横位置調整（96dpi 換算 px、マイナスで左へ。既定 0） |
+| `taskbar_band_reset` | リセット列: `"remaining"` 残り時間（既定）/ `"clock"` 時刻 / `"off"` 非表示 |
 
 > `source: "oauth"` なら `budget_mode` / `plan` / `plans` は使われません（公式%をそのまま表示）。
 > ccusage 推定を使う場合、`budget_mode: "auto"` は週次がピークに張り付くため `"fixed"` 推奨。
@@ -88,6 +107,7 @@ python tray_app.py
 | `tray_app.py` | エントリ。pystray アイコン + ポーリングスレッド + メニュー |
 | `usage.py` | ccusage を実行し 5時間枠・週次枠を集計（単体実行で数値確認可） |
 | `gauge.py` | Pillow で二重リングアイコンを描画（単体実行でサンプル PNG 出力） |
+| `taskbar_band.py` | タスクバー埋め込みメーター（Win32 子ウィンドウ + Pillow 描画） |
 | `config.py` / `config.json` | 設定の読み込みと既定値 |
 | `autostart.py` | スタートアップ登録の ON/OFF |
 | `appdata.py` | ログファイルと状態（リフレッシュのバックオフ / 最後の取得値）の保存 |
@@ -98,6 +118,8 @@ python usage.py          # 5時間枠・週次枠の使用トークン/リセッ
 python usage.py diag     # 認証状態（トークン期限・バックオフ・ログ場所）を表示
 python usage.py refresh  # トークン再取得をその場で強制実行
 python gauge.py     # sample_30/70/95/unknown.png を出力（色分け確認）
+python taskbar_band.py png  # band_dark/light.png を出力（メーターの見た目確認）
+python taskbar_band.py 15   # ダミー値でタスクバーに 15 秒間埋め込み表示
 python tray_app.py  # トレイ常駐
 python -m unittest -v test_usage  # 自動更新・期限切れ・通信復旧の回帰テスト（実通信なし）
 ```

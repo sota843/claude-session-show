@@ -60,6 +60,13 @@ DEFAULTS: Dict[str, Any] = {
     },
     "show_center_text": True,
     "icon_size": 64,
+
+    # Wide battery-style meter embedded in the taskbar, left of the
+    # notification area. offset_x nudges it (in 96-dpi px; negative = left).
+    "taskbar_band": True,
+    "taskbar_band_offset_x": 0,
+    # Reset column: "remaining" (2h13m / 3d4h), "clock" (14:30 / 10/9) or "off".
+    "taskbar_band_reset": "remaining",
 }
 
 
