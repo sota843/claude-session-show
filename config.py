@@ -67,6 +67,15 @@ DEFAULTS: Dict[str, Any] = {
     "taskbar_band_offset_x": 0,
     # Reset column: "remaining" (2h13m / 3d4h), "clock" (14:30 / 10/9) or "off".
     "taskbar_band_reset": "remaining",
+    # Which taskbar: "primary" (main monitor) or "secondary" (another monitor's
+    # taskbar - it has no tray icons, so usually more room; falls back to
+    # primary while that monitor is disconnected).
+    "taskbar_band_monitor": "primary",
+    # Which end of the taskbar: "right" (next to the tray / clock) or "left"
+    # (right after the Widgets/weather button, or the far left when it is off).
+    # Per taskbar: {"primary": "right", "secondary": "left"} - e.g. bottom-left
+    # on the second monitor, bottom-right when only the main one is connected.
+    "taskbar_band_side": "right",
 }
 
 

@@ -67,6 +67,17 @@ python tray_app.py
 - 取得失敗時は最後の値を半透明で表示
 - クリックはタスクバーへ素通り。ライト/ダークテーマと DPI に自動追従
 - エクスプローラー再起動やトレイのアイコン増減にも 1 秒以内に追従・再埋め込み
+- タスクバーのボタン（アプリ・スタート・検索・ウィジェット）とは重ならないよう、
+  UI Automation でボタン位置を調べて空きスペースに配置（Windows 11）。
+  入りきらないときは「リセット列なし」→「数字だけ（`5h 42%`）」の順に縮め、
+  トレイ横に空きがなければ別の空き（ウィジェットとスタートの間など）へ移動。
+  どこにも入らなければ一時的に非表示（トレイアイコンは常に表示）
+- マルチモニターなら `"taskbar_band_monitor": "secondary"` でサブモニターのタスクバー
+  （時計の左）に表示。通知領域がないぶん空きが広く、モニター切断中はメインに戻る
+- `"taskbar_band_side": "left"` で左下に表示（ウィジェット＝天気の右隣。ウィジェットを
+  オフにすると左端）。Windows 11 のみ
+- 位置はタスクバーごとにも指定可: `{"primary": "right", "secondary": "left"}` なら
+  サブモニター接続中は左下、モニター 1 枚のときはメインの右下
 - 位置がずれる場合は `taskbar_band_offset_x` で調整（マイナスで左へ）
 
 > ⚠️ 非公式な埋め込み方式のため、Windows の大型アップデートで表示が崩れる可能性があります。
@@ -95,8 +106,10 @@ python tray_app.py
 | `show_center_text` | アイコン中央に 5時間枠の使用%（整数）を重ねる |
 | `icon_size` | 内部描画サイズ（既定 64、Windows 側で縮小） |
 | `taskbar_band` | タスクバー埋め込みメーターを表示（既定 true） |
-| `taskbar_band_offset_x` | メーターの横位置調整（96dpi 換算 px、マイナスで左へ。既定 0） |
+| `taskbar_band_offset_x` | メーターの横位置調整（96dpi 換算 px、マイナスで左へ。既定 0。`left` 時は空きの中でのみ動く） |
 | `taskbar_band_reset` | リセット列: `"remaining"` 残り時間（既定）/ `"clock"` 時刻 / `"off"` 非表示 |
+| `taskbar_band_monitor` | 表示するタスクバー: `"primary"` メイン（既定）/ `"secondary"` サブモニター |
+| `taskbar_band_side` | 表示位置: `"right"` 通知領域・時計の左（既定）/ `"left"` 左下（天気の右隣）。`{"primary": "right", "secondary": "left"}` でタスクバーごとに指定 |
 
 > `source: "oauth"` なら `budget_mode` / `plan` / `plans` は使われません（公式%をそのまま表示）。
 > ccusage 推定を使う場合、`budget_mode: "auto"` は週次がピークに張り付くため `"fixed"` 推奨。
@@ -108,6 +121,7 @@ python tray_app.py
 | `usage.py` | ccusage を実行し 5時間枠・週次枠を集計（単体実行で数値確認可） |
 | `gauge.py` | Pillow で二重リングアイコンを描画（単体実行でサンプル PNG 出力） |
 | `taskbar_band.py` | タスクバー埋め込みメーター（Win32 子ウィンドウ + Pillow 描画） |
+| `taskbar_uia.py` | タスクバーのボタン位置を UI Automation で取得（メーターの重なり回避用） |
 | `config.py` / `config.json` | 設定の読み込みと既定値 |
 | `autostart.py` | スタートアップ登録の ON/OFF |
 | `appdata.py` | ログファイルと状態（リフレッシュのバックオフ / 最後の取得値）の保存 |
@@ -118,7 +132,8 @@ python usage.py          # 5時間枠・週次枠の使用トークン/リセッ
 python usage.py diag     # 認証状態（トークン期限・バックオフ・ログ場所）を表示
 python usage.py refresh  # トークン再取得をその場で強制実行
 python gauge.py     # sample_30/70/95/unknown.png を出力（色分け確認）
-python taskbar_band.py png  # band_dark/light.png を出力（メーターの見た目確認）
+python taskbar_band.py png  # band_dark/light*.png を出力（3 種類のレイアウトの見た目確認）
+python taskbar_uia.py [secondary]  # タスクバーのボタン位置（x 範囲）と時計/通知領域の左端を表示
 python taskbar_band.py 15   # ダミー値でタスクバーに 15 秒間埋め込み表示
 python tray_app.py  # トレイ常駐
 python -m unittest -v test_usage  # 自動更新・期限切れ・通信復旧の回帰テスト（実通信なし）

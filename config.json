@@ -29,5 +29,7 @@
 
   "taskbar_band": true,
   "taskbar_band_offset_x": 0,
-  "taskbar_band_reset": "remaining"
+  "taskbar_band_reset": "remaining",
+  "taskbar_band_monitor": "secondary",
+  "taskbar_band_side": { "primary": "right", "secondary": "left" }
 }

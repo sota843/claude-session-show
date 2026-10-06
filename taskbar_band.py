@@ -1,8 +1,9 @@
 """A wide battery-style usage meter embedded *inside* the Windows taskbar.
 
 Tray icons are fixed squares, so to get a battery-style wide readout we create
-our own window and make it a child of the taskbar (``Shell_TrayWnd``), placed
-just left of the notification area - the same trick TrafficMonitor uses.
+our own window and make it a child of the taskbar (``Shell_TrayWnd``, or
+``Shell_SecondaryTrayWnd`` on another monitor), placed just left of the
+notification area / clock - the same trick TrafficMonitor uses.
 
 The window is a per-pixel-alpha layered child (Win8+), rendered with Pillow and
 pushed via UpdateLayeredWindow, and is click-through (WS_EX_TRANSPARENT).
@@ -22,10 +23,11 @@ import time
 import winreg
 from datetime import datetime
 from ctypes import wintypes
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+import taskbar_uia
 from usage import Gauge, UsageSnapshot
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -43,8 +45,12 @@ WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
+SWP_HIDEWINDOW = 0x0080
 HWND_TOP = 0
 GW_HWNDPREV = 3
 ULW_ALPHA = 0x02
@@ -164,14 +170,23 @@ def _color(pct: Optional[float], cfg: Dict[str, Any]) -> Tuple[int, int, int]:
 
 
 RESET_COL = 44  # extra width (96-dpi px) for the reset column
+MINI_W = 52     # "5h 42%" text only, for when the taskbar is crowded
+
+# Widest first: the band falls back to narrower ones when buttons leave no room.
+#   full    = label + battery + % + reset time
+#   compact = label + battery + %
+#   mini    = label + % (warn/crit tinted)
+LAYOUTS = ("full", "compact", "mini")
 
 
 def _reset_mode(cfg: Dict[str, Any]) -> str:
     return str(cfg.get("taskbar_band_reset", "remaining"))
 
 
-def band_width(scale: float, cfg: Dict[str, Any]) -> int:
-    extra = 0 if _reset_mode(cfg) == "off" else RESET_COL
+def band_width(scale: float, cfg: Dict[str, Any], layout: str = "full") -> int:
+    if layout == "mini":
+        return int(round(MINI_W * scale))
+    extra = RESET_COL if layout == "full" and _reset_mode(cfg) != "off" else 0
     return int(round((102 + extra) * scale))
 
 
@@ -192,10 +207,11 @@ def format_reset(g: Optional[Gauge], mode: str, now: Optional[datetime] = None) 
 
 
 def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
-                scale: float, light: bool, stale: bool = False) -> Image.Image:
+                scale: float, light: bool, stale: bool = False,
+                layout: str = "full") -> Image.Image:
     """Two battery rows (5h / 7d) sized to the taskbar height. RGBA, straight alpha."""
-    w, h = band_width(scale, cfg), height
-    mode = _reset_mode(cfg)
+    w, h = band_width(scale, cfg, layout), height
+    mode = _reset_mode(cfg) if layout == "full" else "off"
     W, H, s = w * SS, h * SS, scale * SS
     pct_right = 102 * s - 2 * s  # % column ends where the base band ends
     img = Image.new("RGBA", (W, H), (0, 0, 0, 0))
@@ -216,6 +232,13 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
 
         # label
         d.text((2 * s, cy), label, font=font, fill=fg, anchor="lm")
+
+        if layout == "mini":
+            # No room for the battery: tint the number once it needs attention.
+            tint = fg if pct is None or pct < cfg["thresholds"]["warn"] else _color(pct, cfg) + (255,)
+            txt = "--" if pct is None else f"{round(pct * 100)}%"
+            d.text((W - 2 * s, cy), txt, font=font, fill=tint, anchor="rm")
+            continue
 
         # battery body + nub
         bx0, bw, bh = 22 * s, 38 * s, 11 * s
@@ -247,6 +270,85 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
     return img
 
 
+EDGE = 6  # 96-dpi px kept clear between the band and the tray / taskbar buttons
+
+
+def band_side(cfg: Dict[str, Any], on_primary: bool) -> str:
+    """"right"/"left" for this taskbar. ``taskbar_band_side`` is either one value
+    for every taskbar or {"primary": ..., "secondary": ...}."""
+    side = cfg.get("taskbar_band_side", "right")
+    if isinstance(side, dict):
+        side = side.get("primary" if on_primary else "secondary", "right")
+    return str(side)
+
+
+def place_band(spans: Optional[List[Tuple[int, int]]], right: int, scale: float,
+               cfg: Dict[str, Any], side: str = "right") -> Optional[Tuple[int, int, str]]:
+    """Pick (x, width, layout) in taskbar client coords.
+
+    ``spans`` are the taskbar buttons' (left, right) and ``right`` is where the
+    tray area starts. The widest layout that fits in a free gap wins; among
+    gaps, the one touching the tray is preferred, then the one nearest to it.
+    With ``side="left"`` it is the leftmost gap instead (next
+    to the Widgets button, or the very left when Widgets is off), left-aligned.
+    None = no room anywhere. Without spans (Win10 / UIA failed) the band just
+    sits left of the tray at full width, as before.
+    """
+    pad = int(EDGE * scale)
+    off = int(cfg.get("taskbar_band_offset_x", 0) * scale)
+    home_r = right - pad + off
+    if spans is None:
+        w = band_width(scale, cfg)
+        return home_r - w, w, "full"
+    if side == "left":
+        return _place_left(spans, right - pad, pad, off, scale, cfg)
+
+    gaps, cur = [], pad
+    for l, r in sorted((l - pad, r + pad) for l, r in spans):
+        if l >= home_r:
+            break
+        if l > cur:
+            gaps.append((cur, l))
+        cur = max(cur, r)
+    if cur < home_r:
+        gaps.append((cur, home_r))
+    home = gaps[-1] if gaps and gaps[-1][1] == home_r else None
+
+    for layout in LAYOUTS:
+        if layout == "compact" and _reset_mode(cfg) == "off":
+            continue  # identical to "full"
+        w = band_width(scale, cfg, layout)
+        if home and home[1] - home[0] >= w:
+            return home_r - w, w, layout
+        fits = [g for g in gaps if g[1] - g[0] >= w]
+        if fits:
+            a, b = max(fits, key=lambda g: g[1])
+            return (a + b - w) // 2, w, layout
+    return None
+
+
+def _place_left(spans: List[Tuple[int, int]], limit: int, pad: int, off: int,
+                scale: float, cfg: Dict[str, Any]) -> Optional[Tuple[int, int, str]]:
+    """Leftmost free gap the widest layout fits in, band left-aligned in it."""
+    gaps, cur = [], pad
+    for l, r in sorted((l - pad, r + pad) for l, r in spans):
+        if l >= limit:
+            break
+        if l > cur:
+            gaps.append((cur, l))
+        cur = max(cur, r)
+    if cur < limit:
+        gaps.append((cur, limit))
+    for layout in LAYOUTS:
+        if layout == "compact" and _reset_mode(cfg) == "off":
+            continue
+        w = band_width(scale, cfg, layout)
+        for a, b in gaps:
+            if b - a >= w:
+                return max(a, min(a + off, b - w)), w, layout
+    return None
+
+
 def _to_premultiplied_bgra(img: Image.Image) -> bytes:
     r, g, b, a = img.split()
     r, g, b = (ImageChops.multiply(ch, a) for ch in (r, g, b))
@@ -270,13 +372,19 @@ class TaskbarBand:
         self._hwnd: Optional[int] = None
         self._tray: Optional[int] = None
         self._geom: Optional[Tuple[int, int, int, int]] = None
+        self._layout: Optional[str] = None
+        self._hidden_logged = False
         self._style_key: Optional[Tuple[float, bool, int]] = None
         self._wndproc = WNDPROC(self._proc)  # keep alive
         self._thread: Optional[threading.Thread] = None
         self._failed_logged = False
+        # Where the taskbar buttons are, so the band can dodge them.
+        self._probe = taskbar_uia.TaskbarProbe(on_change=lambda: self._post(WM_APP_WAKE), log=log,
+                                               find=self._find_taskbar)
 
     # -- public, thread-safe --
     def start(self) -> None:
+        self._probe.start()  # first, so the band never appears on top of buttons
         self._thread = threading.Thread(target=self._run, name="taskbar-band", daemon=True)
         self._thread.start()
         self._ready.wait(5)
@@ -287,6 +395,7 @@ class TaskbarBand:
         self._post(WM_APP_WAKE)
 
     def stop(self) -> None:
+        self._probe.stop()
         self._post(WM_APP_QUIT)
         if self._thread:
             self._thread.join(3)
@@ -329,8 +438,11 @@ class TaskbarBand:
             user32.DestroyWindow(self._hwnd)
         self.log("[band] stopped")
 
+    def _find_taskbar(self) -> Optional[int]:
+        return taskbar_uia.find_taskbar(str(self.cfg.get("taskbar_band_monitor", "primary")))
+
     def _tick(self) -> None:
-        tray = user32.FindWindowW("Shell_TrayWnd", None)
+        tray = self._find_taskbar()
         if not tray:
             return  # explorer restarting
         if (not self._hwnd or not user32.IsWindow(self._hwnd)
@@ -341,11 +453,26 @@ class TaskbarBand:
 
         scale = (user32.GetDpiForWindow(tray) or 96) / 96
         light = taskbar_is_light()
-        geom = self._target_geom(tray, scale)
+        place = self._target_geom(tray, scale)
+        if place is None:
+            # Buttons fill the taskbar: hide rather than draw on top of them.
+            if not self._hidden_logged:
+                user32.SetWindowPos(self._hwnd, HWND_TOP, 0, 0, 0, 0,
+                                    SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE
+                                    | SWP_NOZORDER | SWP_NOACTIVATE)
+                self.log("[band] no free space in the taskbar - hidden")
+                self._hidden_logged = True
+            self._geom = None
+            return
+        geom, layout = place
+        if self._hidden_logged or layout != self._layout:
+            self.log(f"[band] layout={layout} x={geom[0]}")
+            self._hidden_logged = False
         style_key = (scale, light, int(time.time() // 60))
 
         with self._lock:
-            dirty = self._dirty or geom != self._geom or style_key != self._style_key
+            dirty = (self._dirty or geom != self._geom or layout != self._layout
+                     or style_key != self._style_key)
             snap, stale = self._snap, self._stale
             self._dirty = False
 
@@ -355,39 +482,55 @@ class TaskbarBand:
         elif user32.GetWindow(self._hwnd, GW_HWNDPREV):
             # Something (the XAML taskbar content) got stacked above us.
             user32.SetWindowPos(self._hwnd, HWND_TOP, 0, 0, 0, 0,
-                                SWP_NOACTIVATE | 0x0001 | 0x0002)  # NOSIZE|NOMOVE
+                                SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE)
         if dirty:
-            self._paint(render_band(snap, self.cfg, geom[3], scale, light, stale))
-        self._geom, self._style_key = geom, style_key
+            self._paint(render_band(snap, self.cfg, geom[3], scale, light, stale, layout))
+        self._geom, self._layout, self._style_key = geom, layout, style_key
 
     def _create(self, tray: int) -> None:
+        if self._hwnd and user32.IsWindow(self._hwnd):
+            # Moving to another taskbar (e.g. the secondary monitor came back).
+            user32.DestroyWindow(self._hwnd)
         self._tray = tray
         self._geom = None
+        self._hidden_logged = False
         self._hwnd = user32.CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
             CLASS_NAME, "Claude usage", WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
             0, 0, 1, 1, tray, None, kernel32.GetModuleHandleW(None), None)
         if self._hwnd:
-            self.log(f"[band] created hwnd={self._hwnd:#x} in Shell_TrayWnd={tray:#x}")
+            self.log(f"[band] created hwnd={self._hwnd:#x} in taskbar={tray:#x}")
             self._failed_logged = False
         elif not self._failed_logged:
             self.log(f"[band] CreateWindowEx failed: err={ctypes.get_last_error()}")
             self._failed_logged = True
 
-    def _target_geom(self, tray: int, scale: float) -> Tuple[int, int, int, int]:
-        """(x, y, w, h) in Shell_TrayWnd client coords: just left of the tray area."""
+    def _target_geom(self, tray: int, scale: float
+                     ) -> Optional[Tuple[Tuple[int, int, int, int], str]]:
+        """((x, y, w, h), layout) in taskbar client coords, or None when the
+        taskbar buttons leave no room. Prefers just left of the tray area/clock."""
         rt = wintypes.RECT()
         user32.GetWindowRect(tray, ctypes.byref(rt))
         h = rt.bottom - rt.top
-        w = band_width(scale, self.cfg)
+        layout = self._probe.layout_for(tray)
+        spans = None
         notify = user32.FindWindowExW(tray, None, "TrayNotifyWnd", None)
         rn = wintypes.RECT()
         if notify and user32.GetWindowRect(notify, ctypes.byref(rn)) and rn.right > rn.left:
             right = rn.left - rt.left
+        elif layout is not None:
+            # Secondary taskbar: only a clock (if any) on the right, no HWND for it.
+            right = (layout[1] if layout[1] is not None else rt.right) - rt.left
         else:
             right = (rt.right - rt.left) - int(300 * scale)
-        x = right - w - int(6 * scale) + int(self.cfg.get("taskbar_band_offset_x", 0) * scale)
-        return (x, 0, w, h)
+        if layout is not None:
+            spans = [(l - rt.left, r - rt.left) for l, r in layout[0]]
+        on_primary = tray == user32.FindWindowW("Shell_TrayWnd", None)
+        place = place_band(spans, right, scale, self.cfg, band_side(self.cfg, on_primary))
+        if place is None:
+            return None
+        x, w, layout = place
+        return (x, 0, w, h), layout
 
     def _paint(self, img: Image.Image) -> None:
         w, h = img.size
@@ -433,11 +576,13 @@ if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "png":
         for light in (False, True):
             bg = (243, 243, 243, 255) if light else (32, 32, 32, 255)
-            im = render_band(fake, cfg, 72, 1.5, light)
-            canvas = Image.new("RGBA", im.size, bg)
-            canvas.alpha_composite(im)
-            canvas.save(f"band_{'light' if light else 'dark'}.png")
-        print("wrote band_dark.png / band_light.png")
+            for layout in LAYOUTS:
+                im = render_band(fake, cfg, 72, 1.5, light, layout=layout)
+                canvas = Image.new("RGBA", im.size, bg)
+                canvas.alpha_composite(im)
+                suffix = "" if layout == "full" else f"_{layout}"
+                canvas.save(f"band_{'light' if light else 'dark'}{suffix}.png")
+        print("wrote band_dark*.png / band_light*.png")
     else:
         secs = float(sys.argv[1]) if len(sys.argv) > 1 else 15
         band = TaskbarBand(cfg)
