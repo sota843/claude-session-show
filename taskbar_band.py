@@ -18,6 +18,8 @@ Toggle with ``"taskbar_band"`` in config.json (on by default).
 from __future__ import annotations
 
 import ctypes
+import functools
+import math
 import threading
 import time
 import winreg
@@ -27,7 +29,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
+import band_anim
 import taskbar_uia
+from band_anim import BandAnimator, RowFrame
 from usage import Gauge, UsageSnapshot
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -139,6 +143,7 @@ _sig(kernel32.GetCurrentThreadId, wintypes.DWORD)
 
 # ----- rendering ----------------------------------------------------------------
 
+@functools.lru_cache(maxsize=16)
 def _font(px: int) -> ImageFont.FreeTypeFont:
     for name in ("seguisb.ttf", "segoeui.ttf", "arial.ttf"):
         try:
@@ -206,10 +211,40 @@ def format_reset(g: Optional[Gauge], mode: str, now: Optional[datetime] = None) 
     return f"{mins // 1440}d{mins % 1440 // 60}h"
 
 
+def _draw_glint(img: Image.Image, box: Tuple[float, float, float, float], radius: float,
+                progress: float, s: float) -> None:
+    """A soft, slanted shine at ``progress`` (0..1) across ``box``, clipped to it."""
+    x0, y0, x1, y1 = box
+    half, skew = 5 * s, 3 * s
+    e = 0.5 - 0.5 * math.cos(math.pi * progress)
+    cx = x0 - half - skew + (x1 - x0 + 2 * (half + skew)) * e
+    layer = Image.new("RGBA", img.size, (255, 255, 255, 0))
+    d = ImageDraw.Draw(layer)
+    for k in range(-int(half), int(half) + 1):
+        a = int(150 * (1 - abs(k) / half))
+        if a > 0:
+            d.line([(cx + k + skew, y0), (cx + k - skew, y1)], fill=(255, 255, 255, a), width=1)
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(list(box), radius=radius, fill=255)
+    layer.putalpha(ImageChops.multiply(layer.getchannel("A"), mask))
+    img.alpha_composite(layer)
+
+
+def static_frames(snap: Optional[UsageSnapshot], cfg: Dict[str, Any]) -> List[RowFrame]:
+    """Frames for drawing the snapshot as-is (no animation in flight)."""
+    return [RowFrame(p, _color(p, cfg), None, 1.0) for p in row_pcts(snap)]
+
+
+def row_pcts(snap: Optional[UsageSnapshot]) -> List[Optional[float]]:
+    gauges = (snap.session, snap.weekly) if snap else (None, None)
+    return [g.pct if isinstance(g, Gauge) else None for g in gauges]
+
+
 def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
                 scale: float, light: bool, stale: bool = False,
-                layout: str = "full") -> Image.Image:
-    """Two battery rows (5h / 7d) sized to the taskbar height. RGBA, straight alpha."""
+                layout: str = "full", frames: Optional[List[RowFrame]] = None) -> Image.Image:
+    """Two battery rows (5h / 7d) sized to the taskbar height. RGBA, straight alpha.
+    ``frames`` (from BandAnimator) override the drawn %/colour mid-animation."""
     w, h = band_width(scale, cfg, layout), height
     mode = _reset_mode(cfg) if layout == "full" else "off"
     W, H, s = w * SS, h * SS, scale * SS
@@ -222,12 +257,14 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
     font = _font(int(12 * s))
     small = _font(int(11 * s))
     now = datetime.now().astimezone()
+    frames = frames or static_frames(snap, cfg)
 
     rows = [("5h", snap.session if snap else None), ("7d", snap.weekly if snap else None)]
     row_h = 17 * s
     top = (H - row_h * len(rows)) / 2
     for i, (label, g) in enumerate(rows):
-        pct = g.pct if isinstance(g, Gauge) else None
+        f = frames[i]
+        pct = f.pct
         cy = top + row_h * (i + 0.5)
 
         # label
@@ -235,7 +272,8 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
 
         if layout == "mini":
             # No room for the battery: tint the number once it needs attention.
-            tint = fg if pct is None or pct < cfg["thresholds"]["warn"] else _color(pct, cfg) + (255,)
+            tint = (fg if pct is None or pct < cfg["thresholds"]["warn"]
+                    else f.color + (round(255 * f.pulse),))
             txt = "--" if pct is None else f"{round(pct * 100)}%"
             d.text((W - 2 * s, cy), txt, font=font, fill=tint, anchor="rm")
             continue
@@ -252,8 +290,11 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
             inset = lw + 1.2 * s
             fw = (bw - 2 * inset) * min(max(pct, 0.0), 1.0)
             if fw >= 1:
-                d.rounded_rectangle([bx0 + inset, by0 + inset, bx0 + inset + fw, by0 + bh - inset],
-                                    radius=1.2 * s, fill=_color(pct, cfg) + (255,))
+                box = (bx0 + inset, by0 + inset, bx0 + inset + fw, by0 + bh - inset)
+                d.rounded_rectangle(list(box), radius=1.2 * s,
+                                    fill=f.color + (round(255 * f.pulse),))
+                if f.glint is not None:
+                    _draw_glint(img, box, 1.2 * s, f.glint, s)
 
         # percentage
         txt = "--" if pct is None else f"{round(pct * 100)}%"
@@ -365,7 +406,13 @@ class TaskbarBand:
         self.log = log
         self._snap: Optional[UsageSnapshot] = None
         self._stale = False
-        self._dirty = True
+        self._dirty = True    # new snapshot not yet handed to the animator
+        self._repaint = True  # something changed that the window does not show yet
+        self._anim = BandAnimator(lambda p: _color(p, cfg), cfg["thresholds"]["crit"],
+                                  enabled=bool(cfg.get("taskbar_band_animate", True)),
+                                  pulse=bool(cfg.get("taskbar_band_pulse", True)))
+        self._scale, self._light = 1.0, False
+        self._breath_cache: Optional[Tuple[Any, Image.Image, Image.Image]] = None
         self._lock = threading.Lock()
         self._tid: Optional[int] = None
         self._ready = threading.Event()
@@ -422,18 +469,32 @@ class TaskbarBand:
 
         msg = wintypes.MSG()
         quit_ = False
+        last_tick = 0.0
         while not quit_:
-            user32.MsgWaitForMultipleObjects(0, None, False, 1000, QS_ALLINPUT)
+            # Housekeeping once a second; animation frames in between only while
+            # something is actually moving.
+            delay = (self._anim.next_delay(time.monotonic(), not self._stale)
+                     if self._geom else None)
+            timeout = 1000 if delay is None else max(1, int(delay * 1000))
+            user32.MsgWaitForMultipleObjects(0, None, False, timeout, QS_ALLINPUT)
+            woke = False
             while user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_REMOVE):
+                woke = True
                 if msg.message == WM_APP_QUIT:
                     quit_ = True
                 user32.TranslateMessage(ctypes.byref(msg))
                 user32.DispatchMessageW(ctypes.byref(msg))
-            if not quit_:
-                try:
+            if quit_:
+                break
+            now = time.monotonic()
+            try:
+                if woke or now - last_tick >= 1.0:
                     self._tick()
-                except Exception as exc:  # noqa: BLE001 - never let the pump die
-                    self.log(f"[band] tick error: {exc!r}")
+                    last_tick = now
+                elif self._geom and self._anim.active(now, not self._stale):
+                    self._paint(self._render(now))
+            except Exception as exc:  # noqa: BLE001 - never let the pump die
+                self.log(f"[band] tick error: {exc!r}")
         if self._hwnd and user32.IsWindow(self._hwnd):
             user32.DestroyWindow(self._hwnd)
         self.log("[band] stopped")
@@ -442,6 +503,12 @@ class TaskbarBand:
         return taskbar_uia.find_taskbar(str(self.cfg.get("taskbar_band_monitor", "primary")))
 
     def _tick(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if self._dirty:
+                self._anim.retarget(row_pcts(self._snap), now)
+                self._dirty, self._repaint = False, True
+            stale = self._stale
         tray = self._find_taskbar()
         if not tray:
             return  # explorer restarting
@@ -470,11 +537,9 @@ class TaskbarBand:
             self._hidden_logged = False
         style_key = (scale, light, int(time.time() // 60))
 
-        with self._lock:
-            dirty = (self._dirty or geom != self._geom or layout != self._layout
-                     or style_key != self._style_key)
-            snap, stale = self._snap, self._stale
-            self._dirty = False
+        dirty = (self._repaint or geom != self._geom or layout != self._layout
+                 or style_key != self._style_key)
+        self._repaint = False
 
         if geom != self._geom:
             x, y, w, h = geom
@@ -483,9 +548,30 @@ class TaskbarBand:
             # Something (the XAML taskbar content) got stacked above us.
             user32.SetWindowPos(self._hwnd, HWND_TOP, 0, 0, 0, 0,
                                 SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE)
-        if dirty:
-            self._paint(render_band(snap, self.cfg, geom[3], scale, light, stale, layout))
         self._geom, self._layout, self._style_key = geom, layout, style_key
+        self._scale, self._light = scale, light
+        if dirty or self._anim.active(now, not stale):
+            self._paint(self._render(now))
+
+    def _render(self, now: float) -> Image.Image:
+        """The band as of ``now``, mid-animation if one is running."""
+        with self._lock:
+            snap, stale = self._snap, self._stale
+        args = (snap, self.cfg, self._geom[3], self._scale, self._light, stale, self._layout)
+        if self._anim.busy(now) or not self._anim.active(now, not stale):
+            self._breath_cache = None
+            return render_band(*args, self._anim.frame(now, not stale))
+        # Only breathing: just the crit fill's opacity changes, so render both
+        # ends of a breath once and cross-fade them (a full render is ~10ms).
+        key = (snap, stale, self._geom, self._layout, self._scale, self._light,
+               int(time.time() // 60))
+        if self._breath_cache is None or self._breath_cache[0] != key:
+            lo = 1 - band_anim.PULSE_DEPTH
+            self._breath_cache = (key, render_band(*args, self._anim.frame(now, breath=lo)),
+                                  render_band(*args, self._anim.frame(now, breath=1.0)))
+        _, dim, full = self._breath_cache
+        lo = 1 - band_anim.PULSE_DEPTH
+        return Image.blend(dim, full, (self._anim.breath(now) - lo) / band_anim.PULSE_DEPTH)
 
     def _create(self, tray: int) -> None:
         if self._hwnd and user32.IsWindow(self._hwnd):
@@ -583,6 +669,24 @@ if __name__ == "__main__":
                 suffix = "" if layout == "full" else f"_{layout}"
                 canvas.save(f"band_{'light' if light else 'dark'}{suffix}.png")
         print("wrote band_dark*.png / band_light*.png")
+    elif len(sys.argv) > 1 and sys.argv[1] == "demo":
+        # Walk through every animation in the real taskbar.
+        def fake_at(s5: float, s7: float) -> UsageSnapshot:
+            return UsageSnapshot(session=Gauge(s5, 100, _now + timedelta(hours=2, minutes=13)),
+                                 weekly=Gauge(s7, 100, _now + timedelta(days=3, hours=4)),
+                                 error=None, fetched_at=datetime.now().astimezone())
+        band = TaskbarBand(cfg)
+        band.start()
+        steps = [((42, 55), "start"), ((47, 58), "small rise: ease + count + shine"),
+                 ((52, 66), "7d crosses warn: colour fade"),
+                 ((60, 90), "both cross: 7d goes crit -> breathing"),
+                 ((2, 90), "5h window resets: drain")]
+        for (s5, s7), what in steps:
+            print(f"5h={s5}% 7d={s7}%  {what}", flush=True)
+            band.update(fake_at(s5, s7))
+            time.sleep(4)
+        time.sleep(4)
+        band.stop()
     else:
         secs = float(sys.argv[1]) if len(sys.argv) > 1 else 15
         band = TaskbarBand(cfg)

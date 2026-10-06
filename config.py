@@ -76,6 +76,10 @@ DEFAULTS: Dict[str, Any] = {
     # Per taskbar: {"primary": "right", "secondary": "left"} - e.g. bottom-left
     # on the second monitor, bottom-right when only the main one is connected.
     "taskbar_band_side": "right",
+    # Short animations when the numbers change (bar eases, % counts, shine,
+    # colour cross-fade). taskbar_band_pulse: slow breathing while >= crit.
+    "taskbar_band_animate": True,
+    "taskbar_band_pulse": True,
 }
 
 

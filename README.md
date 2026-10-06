@@ -78,6 +78,9 @@ python tray_app.py
   オフにすると左端）。Windows 11 のみ
 - 位置はタスクバーごとにも指定可: `{"primary": "right", "secondary": "left"}` なら
   サブモニター接続中は左下、モニター 1 枚のときはメインの右下
+- 値が変わったときだけ短いアニメーション: バーがなめらかに伸縮し % がカウント、
+  光が 1 回横切る、しきい値をまたぐと色がふわっと変化、リセット時はスーッと減る。
+  危険域（85%〜）の間だけバーがゆっくり明滅（`taskbar_band_animate` / `taskbar_band_pulse` で OFF 可）
 - 位置がずれる場合は `taskbar_band_offset_x` で調整（マイナスで左へ）
 
 > ⚠️ 非公式な埋め込み方式のため、Windows の大型アップデートで表示が崩れる可能性があります。
@@ -109,6 +112,8 @@ python tray_app.py
 | `taskbar_band_offset_x` | メーターの横位置調整（96dpi 換算 px、マイナスで左へ。既定 0。`left` 時は空きの中でのみ動く） |
 | `taskbar_band_reset` | リセット列: `"remaining"` 残り時間（既定）/ `"clock"` 時刻 / `"off"` 非表示 |
 | `taskbar_band_monitor` | 表示するタスクバー: `"primary"` メイン（既定）/ `"secondary"` サブモニター |
+| `taskbar_band_animate` | 値が変わったときのアニメーション（既定 true） |
+| `taskbar_band_pulse` | 危険域の間だけバーをゆっくり明滅（既定 true） |
 | `taskbar_band_side` | 表示位置: `"right"` 通知領域・時計の左（既定）/ `"left"` 左下（天気の右隣）。`{"primary": "right", "secondary": "left"}` でタスクバーごとに指定 |
 
 > `source: "oauth"` なら `budget_mode` / `plan` / `plans` は使われません（公式%をそのまま表示）。
@@ -121,6 +126,7 @@ python tray_app.py
 | `usage.py` | ccusage を実行し 5時間枠・週次枠を集計（単体実行で数値確認可） |
 | `gauge.py` | Pillow で二重リングアイコンを描画（単体実行でサンプル PNG 出力） |
 | `taskbar_band.py` | タスクバー埋め込みメーター（Win32 子ウィンドウ + Pillow 描画） |
+| `band_anim.py` | メーターのアニメーション（タイミングと状態のみ。描画は taskbar_band） |
 | `taskbar_uia.py` | タスクバーのボタン位置を UI Automation で取得（メーターの重なり回避用） |
 | `config.py` / `config.json` | 設定の読み込みと既定値 |
 | `autostart.py` | スタートアップ登録の ON/OFF |
@@ -135,8 +141,9 @@ python gauge.py     # sample_30/70/95/unknown.png を出力（色分け確認）
 python taskbar_band.py png  # band_dark/light*.png を出力（3 種類のレイアウトの見た目確認）
 python taskbar_uia.py [secondary]  # タスクバーのボタン位置（x 範囲）と時計/通知領域の左端を表示
 python taskbar_band.py 15   # ダミー値でタスクバーに 15 秒間埋め込み表示
+python taskbar_band.py demo # アニメーションを一通りタスクバー上で再生（約 25 秒）
 python tray_app.py  # トレイ常駐
-python -m unittest -v test_usage  # 自動更新・期限切れ・通信復旧の回帰テスト（実通信なし）
+python -m unittest -v test_usage test_band_anim  # 回帰テスト（実通信なし）
 ```
 
 ## トークン更新とトラブルシューティング
