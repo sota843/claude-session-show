@@ -81,6 +81,9 @@ python tray_app.py
 - 値が変わったときだけ短いアニメーション: バーがなめらかに伸縮し % がカウント、
   光が 1 回横切る、しきい値をまたぐと色がふわっと変化、リセット時はスーッと減る。
   危険域（85%〜）の間だけバーがゆっくり明滅（`taskbar_band_animate` / `taskbar_band_pulse` で OFF 可）
+- 常時アニメーション: 約 5 秒ごとに光がバーを横切り（5h → 7d の順）、小さな星がランダムに
+  キラッと瞬く（星はバーが短いほど控えめ。データが古いとき・mini 表示ではどちらも出ない。
+  `taskbar_band_shimmer` / `taskbar_band_sparkle` で個別に OFF 可）
 - 位置がずれる場合は `taskbar_band_offset_x` で調整（マイナスで左へ）
 
 > ⚠️ 非公式な埋め込み方式のため、Windows の大型アップデートで表示が崩れる可能性があります。
@@ -114,6 +117,8 @@ python tray_app.py
 | `taskbar_band_monitor` | 表示するタスクバー: `"primary"` メイン（既定）/ `"secondary"` サブモニター |
 | `taskbar_band_animate` | 値が変わったときのアニメーション（既定 true） |
 | `taskbar_band_pulse` | 危険域の間だけバーをゆっくり明滅（既定 true） |
+| `taskbar_band_shimmer` | 約 5 秒ごとに光がバーを横切る常時アニメーション（既定 true） |
+| `taskbar_band_sparkle` | バーの上で星がキラキラ瞬く常時アニメーション（既定 true） |
 | `taskbar_band_side` | 表示位置: `"right"` 通知領域・時計の左（既定）/ `"left"` 左下（天気の右隣）。`{"primary": "right", "secondary": "left"}` でタスクバーごとに指定 |
 
 > `source: "oauth"` なら `budget_mode` / `plan` / `plans` は使われません（公式%をそのまま表示）。

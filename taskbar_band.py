@@ -230,6 +230,74 @@ def _draw_glint(img: Image.Image, box: Tuple[float, float, float, float], radius
     img.alpha_composite(layer)
 
 
+ROW_H = 17
+BAT_X, BAT_W, BAT_H = 22, 38, 11  # battery body, 96-dpi px
+SPARKLE_STEPS = 8  # sizes a twinkle passes through (each a cached sprite)
+
+
+def _row_centres(H: float, s: float, n: int = 2) -> List[float]:
+    top = (H - ROW_H * s * n) / 2
+    return [top + ROW_H * s * (i + 0.5) for i in range(n)]
+
+
+def _fill_box(cy: float, pct: float, s: float) -> Optional[Tuple[float, float, float, float]]:
+    """The battery fill for ``pct`` on the row centred at ``cy`` (None if < 1px)."""
+    lw = max(1, int(round(1.2 * s)))
+    inset = lw + 1.2 * s
+    x0, y0 = BAT_X * s + inset, cy - BAT_H * s / 2 + inset
+    fw = (BAT_W * s - 2 * inset) * min(max(pct, 0.0), 1.0)
+    if fw < 1:
+        return None
+    return x0, y0, x0 + fw, cy + BAT_H * s / 2 - inset
+
+
+@functools.lru_cache(maxsize=64)
+def _sparkle_sprite(step: int, scale: float) -> Image.Image:
+    """A four-pointed twinkle at ``step``/SPARKLE_STEPS of its full size."""
+    e = step / SPARKLE_STEPS
+    arm = (1.2 + 2.8 * e) * scale  # final px
+    side = int(math.ceil(2 * arm)) + 2
+    S, c, R = side * SS, side * SS / 2, arm * SS
+    w = R * 0.2
+    a = round(255 * (0.45 + 0.55 * e))
+    im = Image.new("RGBA", (S, S), (255, 255, 255, 0))
+    d = ImageDraw.Draw(im)
+    g = R * 0.45
+    d.ellipse([c - g, c - g, c + g, c + g], fill=(255, 255, 240, a // 3))
+    d.polygon([(c, c - R), (c + w, c - w), (c + R, c), (c + w, c + w),
+               (c, c + R), (c - w, c + w), (c - R, c), (c - w, c - w)],
+              fill=(255, 255, 240, a))
+    return im.resize((side, side), Image.LANCZOS)
+
+
+def draw_glints(img: Image.Image, frames: List[RowFrame], scale: float) -> None:
+    """The idle shine onto an already rendered band (final pixels), so the
+    settled band can stay cached while it sweeps."""
+    s = scale * SS
+    for f, cy in zip(frames, _row_centres(img.height * SS, s)):
+        box = _fill_box(cy, f.pct, s) if f.pct and f.glint is not None else None
+        if box:
+            _draw_glint(img, tuple(v / SS for v in box), 1.2 * scale, f.glint, scale)
+
+
+def draw_sparkles(img: Image.Image, frames: List[RowFrame],
+                  sparks: List[band_anim.Sparkle], scale: float) -> None:
+    """Composite twinkles onto an already rendered band (final pixels)."""
+    s = scale * SS
+    cys = _row_centres(img.height * SS, s)
+    for sp in sparks:
+        step = round(sp.size * SPARKLE_STEPS)
+        pct = frames[sp.row].pct
+        box = _fill_box(cys[sp.row], pct, s) if pct and step > 0 else None
+        if box is None:
+            continue
+        x0, y0, x1, y1 = (v / SS for v in box)
+        sprite = _sparkle_sprite(step, scale)
+        cx, cy = x0 + (x1 - x0) * sp.x, y0 + (y1 - y0) * sp.y
+        img.alpha_composite(sprite, (max(0, round(cx - sprite.width / 2)),
+                                     max(0, round(cy - sprite.height / 2))))
+
+
 def static_frames(snap: Optional[UsageSnapshot], cfg: Dict[str, Any]) -> List[RowFrame]:
     """Frames for drawing the snapshot as-is (no animation in flight)."""
     return [RowFrame(p, _color(p, cfg), None, 1.0) for p in row_pcts(snap)]
@@ -260,12 +328,9 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
     frames = frames or static_frames(snap, cfg)
 
     rows = [("5h", snap.session if snap else None), ("7d", snap.weekly if snap else None)]
-    row_h = 17 * s
-    top = (H - row_h * len(rows)) / 2
-    for i, (label, g) in enumerate(rows):
+    for i, ((label, g), cy) in enumerate(zip(rows, _row_centres(H, s, len(rows)))):
         f = frames[i]
         pct = f.pct
-        cy = top + row_h * (i + 0.5)
 
         # label
         d.text((2 * s, cy), label, font=font, fill=fg, anchor="lm")
@@ -279,7 +344,7 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
             continue
 
         # battery body + nub
-        bx0, bw, bh = 22 * s, 38 * s, 11 * s
+        bx0, bw, bh = BAT_X * s, BAT_W * s, BAT_H * s
         by0 = cy - bh / 2
         lw = max(1, int(round(1.2 * s)))
         d.rounded_rectangle([bx0, by0, bx0 + bw, by0 + bh], radius=2.5 * s,
@@ -287,10 +352,8 @@ def render_band(snap: Optional[UsageSnapshot], cfg: Dict[str, Any], height: int,
         d.rounded_rectangle([bx0 + bw + 1 * s, cy - 2.5 * s, bx0 + bw + 3 * s, cy + 2.5 * s],
                             radius=1 * s, fill=outline)
         if pct:
-            inset = lw + 1.2 * s
-            fw = (bw - 2 * inset) * min(max(pct, 0.0), 1.0)
-            if fw >= 1:
-                box = (bx0 + inset, by0 + inset, bx0 + inset + fw, by0 + bh - inset)
+            box = _fill_box(cy, pct, s)
+            if box:
                 d.rounded_rectangle(list(box), radius=1.2 * s,
                                     fill=f.color + (round(255 * f.pulse),))
                 if f.glint is not None:
@@ -410,9 +473,11 @@ class TaskbarBand:
         self._repaint = True  # something changed that the window does not show yet
         self._anim = BandAnimator(lambda p: _color(p, cfg), cfg["thresholds"]["crit"],
                                   enabled=bool(cfg.get("taskbar_band_animate", True)),
-                                  pulse=bool(cfg.get("taskbar_band_pulse", True)))
+                                  pulse=bool(cfg.get("taskbar_band_pulse", True)),
+                                  sparkle=bool(cfg.get("taskbar_band_sparkle", True)),
+                                  shimmer=bool(cfg.get("taskbar_band_shimmer", True)))
         self._scale, self._light = 1.0, False
-        self._breath_cache: Optional[Tuple[Any, Image.Image, Image.Image]] = None
+        self._idle_cache: Optional[Tuple[Any, Image.Image, Optional[Image.Image]]] = None
         self._lock = threading.Lock()
         self._tid: Optional[int] = None
         self._ready = threading.Event()
@@ -473,7 +538,7 @@ class TaskbarBand:
         while not quit_:
             # Housekeeping once a second; animation frames in between only while
             # something is actually moving.
-            delay = (self._anim.next_delay(time.monotonic(), not self._stale)
+            delay = (self._anim.next_delay(time.monotonic(), not self._stale, self._fill_ok())
                      if self._geom else None)
             timeout = 1000 if delay is None else max(1, int(delay * 1000))
             user32.MsgWaitForMultipleObjects(0, None, False, timeout, QS_ALLINPUT)
@@ -491,7 +556,7 @@ class TaskbarBand:
                 if woke or now - last_tick >= 1.0:
                     self._tick()
                     last_tick = now
-                elif self._geom and self._anim.active(now, not self._stale):
+                elif self._geom and self._anim.active(now, not self._stale, self._fill_ok()):
                     self._paint(self._render(now))
             except Exception as exc:  # noqa: BLE001 - never let the pump die
                 self.log(f"[band] tick error: {exc!r}")
@@ -550,27 +615,49 @@ class TaskbarBand:
                                 SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOMOVE)
         self._geom, self._layout, self._style_key = geom, layout, style_key
         self._scale, self._light = scale, light
-        if dirty or self._anim.active(now, not stale):
+        if dirty or self._anim.active(now, not stale, self._fill_ok()):
             self._paint(self._render(now))
+
+    def _fill_ok(self) -> bool:
+        return self._layout != "mini"  # no battery to shine / sparkle on
 
     def _render(self, now: float) -> Image.Image:
         """The band as of ``now``, mid-animation if one is running."""
         with self._lock:
             snap, stale = self._snap, self._stale
         args = (snap, self.cfg, self._geom[3], self._scale, self._light, stale, self._layout)
-        if self._anim.busy(now) or not self._anim.active(now, not stale):
-            self._breath_cache = None
-            return render_band(*args, self._anim.frame(now, not stale))
-        # Only breathing: just the crit fill's opacity changes, so render both
-        # ends of a breath once and cross-fade them (a full render is ~10ms).
+        frames = self._anim.frame(now, not stale, fill_ok=self._fill_ok())
+        if self._anim.busy(now):
+            self._idle_cache = None
+            img = render_band(*args, frames)
+        else:
+            img = self._idle_base(now, args, snap, stale)
+            if any(f.glint is not None for f in frames):
+                img = img.copy()
+                draw_glints(img, frames, self._scale)
+        sparks = self._anim.sparkles(now, not stale) if self._fill_ok() else []
+        if sparks:
+            img = img.copy()
+            draw_sparkles(img, frames, sparks, self._scale)
+        return img
+
+    def _idle_base(self, now: float, args: Tuple, snap: Optional[UsageSnapshot],
+                   stale: bool) -> Image.Image:
+        """The settled band, rendered once (a full render is ~10ms). While
+        breathing only the crit fill's opacity changes, so both ends of a breath
+        are cached and cross-faded."""
+        breathing = self._anim.pulsing(not stale)
         key = (snap, stale, self._geom, self._layout, self._scale, self._light,
-               int(time.time() // 60))
-        if self._breath_cache is None or self._breath_cache[0] != key:
-            lo = 1 - band_anim.PULSE_DEPTH
-            self._breath_cache = (key, render_band(*args, self._anim.frame(now, breath=lo)),
-                                  render_band(*args, self._anim.frame(now, breath=1.0)))
-        _, dim, full = self._breath_cache
+               int(time.time() // 60), breathing)
         lo = 1 - band_anim.PULSE_DEPTH
+        if self._idle_cache is None or self._idle_cache[0] != key:
+            full = render_band(*args, self._anim.frame(now, breath=1.0, fill_ok=False))
+            dim = (render_band(*args, self._anim.frame(now, breath=lo, fill_ok=False))
+                   if breathing else None)
+            self._idle_cache = (key, full, dim)
+        _, full, dim = self._idle_cache
+        if dim is None:
+            return full
         return Image.blend(dim, full, (self._anim.breath(now) - lo) / band_anim.PULSE_DEPTH)
 
     def _create(self, tray: int) -> None:

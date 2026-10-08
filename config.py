@@ -80,6 +80,10 @@ DEFAULTS: Dict[str, Any] = {
     # colour cross-fade). taskbar_band_pulse: slow breathing while >= crit.
     "taskbar_band_animate": True,
     "taskbar_band_pulse": True,
+    # Always-on idle motion on the battery fill: a shine sweeping across every
+    # few seconds, and small sparkles that twinkle now and then.
+    "taskbar_band_shimmer": True,
+    "taskbar_band_sparkle": True,
 }
 
 
